@@ -18,6 +18,7 @@ func RunScan(args []string) int {
 	globFlag := fset.String("glob", "", "scan files matching this glob pattern")
 	dryRun := fset.Bool("dry-run", false, "print what would be added without modifying evals.yml")
 	configPath := fset.String("config", ".skill-eval.yml", "path to config file")
+	aiFlag := fset.Bool("ai", false, "generate input and assertions using Claude (review before running)")
 
 	if err := fset.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -66,6 +67,12 @@ func RunScan(args []string) int {
 		covered[e.Tests] = true
 	}
 
+	var aiModel string
+	var aiTimeout int
+	if *aiFlag {
+		aiModel, aiTimeout = loadAIConfig(*configPath)
+	}
+
 	type scaffoldEntry struct {
 		evalID   string
 		promptID string
@@ -84,7 +91,21 @@ func RunScan(args []string) int {
 			continue
 		}
 		nextID := nextEvalID(workEntries)
-		text := formatPlaceholderEntry(nextID, pid, f)
+
+		var text string
+		if *aiFlag {
+			fmt.Printf("  Generating %s (%s)...\n", nextID, f)
+			fields, err := generateEvalFields(f, aiModel, aiTimeout)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: AI generation failed for %s (%v); using placeholder.\n", f, err)
+				text = formatPlaceholderEntry(nextID, pid, f)
+			} else {
+				text = formatAIEntry(nextID, pid, f, fields)
+			}
+		} else {
+			text = formatPlaceholderEntry(nextID, pid, f)
+		}
+
 		toAdd = append(toAdd, scaffoldEntry{nextID, pid, f, text})
 		workEntries = append(workEntries, evalInitEntry{ID: nextID, Tests: pid})
 		covered[pid] = true
@@ -135,7 +156,11 @@ func RunScan(args []string) int {
 		}
 	}
 
-	fmt.Printf("\nDone. Fill in the TODO fields in %s before running evals.\n", evalsFile)
+	if *aiFlag {
+		fmt.Printf("\nDone. Review the AI-generated fields in %s before running evals.\n", evalsFile)
+	} else {
+		fmt.Printf("\nDone. Fill in the TODO fields in %s before running evals.\n", evalsFile)
+	}
 	return 0
 }
 

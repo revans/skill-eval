@@ -688,6 +688,78 @@ func TestRunInit_EmptyEvalsFile(t *testing.T) {
 	}
 }
 
+// --- formatAIEntry ---
+
+func TestFormatAIEntry_Structure(t *testing.T) {
+	fields := aiGeneratedEntry{
+		Input: "Write a Rails controller create action for a User model.",
+		Asserts: []map[string]string{
+			{"contains": "params.expect"},
+			{"not_contains": "params.permit"},
+		},
+	}
+	entry := formatAIEntry("EV-001", "RU-001", "substrate/rules/RU-001.md", fields)
+
+	checks := []string{
+		"- id: EV-001",
+		"  tests: RU-001",
+		"  prompt_file: substrate/rules/RU-001.md",
+		"  # AI-generated — review input and assertions before running",
+		`  input: "Write a Rails controller create action for a User model."`,
+		"  assert:",
+		`    - contains: "params.expect"`,
+		`    - not_contains: "params.permit"`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(entry, want) {
+			t.Errorf("entry missing %q\nGot:\n%s", want, entry)
+		}
+	}
+}
+
+func TestFormatAIEntry_NoTODOs(t *testing.T) {
+	fields := aiGeneratedEntry{
+		Input:   "Some task.",
+		Asserts: []map[string]string{{"contains": "expected"}},
+	}
+	entry := formatAIEntry("EV-001", "RU-001", "some/path.md", fields)
+	if strings.Contains(entry, "TODO") {
+		t.Error("AI entry should not contain TODO placeholders")
+	}
+}
+
+func TestFormatAIEntry_TrailingNewline(t *testing.T) {
+	fields := aiGeneratedEntry{
+		Input:   "task",
+		Asserts: []map[string]string{{"contains": "x"}},
+	}
+	entry := formatAIEntry("EV-001", "RU-001", "path.md", fields)
+	if !strings.HasSuffix(entry, "\n") {
+		t.Error("AI entry should end with a newline")
+	}
+}
+
+// --- RunInit --ai flag ---
+
+func TestRunInit_AIFlagAccepted(t *testing.T) {
+	// Verify --ai is a recognized flag (no flag parse error).
+	// Actual AI generation is not exercised in unit tests.
+	// We pass --dry-run to avoid any file writes or Claude calls.
+	_, _, configPath := makeInitTestDir(t, nil)
+	code := RunInit([]string{
+		"--config", configPath,
+		"--path", "substrate/rules/RU-001-params.md",
+		"--ai",
+		"--dry-run",
+	})
+	// Dry-run with --ai and no live Claude: will attempt generation and fall back
+	// to placeholder (or error from Claude not being available). Either 0 is fine
+	// since we just want to confirm the flag is parsed without a flag error (code 2).
+	if code == 2 {
+		t.Errorf("--ai flag caused a flag parse error (exit code 2)")
+	}
+}
+
 func TestRunInit_CreatesConfigWhenMissing(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".skill-eval.yml")

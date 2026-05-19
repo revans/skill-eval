@@ -41,6 +41,79 @@ func createConfigIfMissing(path string) (bool, error) {
 	return true, nil
 }
 
+// aiGeneratedEntry holds the eval fields produced by generateEvalFields.
+type aiGeneratedEntry struct {
+	Input   string
+	Asserts []map[string]string
+}
+
+// generateEvalFields reads the prompt file at promptFilePath, sends it to
+// Claude with a meta-prompt requesting a realistic input task and assertions,
+// and returns the parsed fields. Returns an error if the file cannot be read,
+// the Claude call fails, or the response cannot be parsed.
+func generateEvalFields(promptFilePath, model string, timeoutSeconds int) (aiGeneratedEntry, error) {
+	content, err := os.ReadFile(promptFilePath)
+	if err != nil {
+		return aiGeneratedEntry{}, fmt.Errorf("reading prompt file: %w", err)
+	}
+
+	metaPrompt := "You are generating a test case for a prompt fragment used with an AI assistant.\n\n" +
+		"The prompt fragment is prepended to a user task before the model sees it.\n" +
+		"Suggest a realistic input task and two or three assertions about what correct output should contain.\n\n" +
+		"Prompt fragment:\n---\n" + string(content) + "\n---\n\n" +
+		"Respond with ONLY valid YAML in this exact format — no explanation, no markdown fences:\n\n" +
+		"input: \"a realistic task that exercises this prompt\"\n" +
+		"assert:\n" +
+		"  - contains: \"text the output should contain\"\n" +
+		"  - contains: \"another expected substring\"\n"
+
+	result, err := RunClaude(metaPrompt, model, timeoutSeconds)
+	if err != nil {
+		return aiGeneratedEntry{}, fmt.Errorf("claude invocation: %w", err)
+	}
+
+	var parsed struct {
+		Input  string              `yaml:"input"`
+		Assert []map[string]string `yaml:"assert"`
+	}
+	if err := yaml.Unmarshal([]byte(result.Output), &parsed); err != nil {
+		return aiGeneratedEntry{}, fmt.Errorf("parsing AI response: %w", err)
+	}
+	if parsed.Input == "" || len(parsed.Assert) == 0 {
+		return aiGeneratedEntry{}, fmt.Errorf("AI response missing required fields")
+	}
+
+	return aiGeneratedEntry{Input: parsed.Input, Asserts: parsed.Assert}, nil
+}
+
+// formatAIEntry returns YAML text for an eval entry with AI-generated fields.
+// A review comment is included to remind the user to validate before running.
+func formatAIEntry(id, substrateID, promptFile string, fields aiGeneratedEntry) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "- id: %s\n", id)
+	fmt.Fprintf(&sb, "  tests: %s\n", substrateID)
+	fmt.Fprintf(&sb, "  prompt_file: %s\n", promptFile)
+	sb.WriteString("  # AI-generated — review input and assertions before running\n")
+	fmt.Fprintf(&sb, "  input: %q\n", fields.Input)
+	sb.WriteString("  assert:\n")
+	for _, a := range fields.Asserts {
+		for k, v := range a {
+			fmt.Fprintf(&sb, "    - %s: %q\n", k, v)
+		}
+	}
+	return sb.String()
+}
+
+// loadAIConfig returns the model and timeout to use for AI generation.
+// Falls back to sensible defaults if the config file is absent or invalid.
+func loadAIConfig(configPath string) (model string, timeoutSeconds int) {
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return "claude-sonnet-4-6", 60
+	}
+	return cfg.DefaultModel, cfg.PerEvalTimeoutSeconds
+}
+
 // ExtractSubstrateID extracts the prompt ID from a file path.
 // If the basename matches [A-Z]+-\d+, that prefix is returned (e.g. RU-001).
 // Otherwise, the filename stem (without extension) is used as-is.
@@ -196,6 +269,7 @@ func RunInit(args []string) int {
 	pathFlag := fs.String("path", "", "path to the prompt file")
 	dryRun := fs.Bool("dry-run", false, "print the entry without modifying evals.yml")
 	configPath := fs.String("config", ".skill-eval.yml", "path to .skill-eval.yml config file")
+	aiFlag := fs.Bool("ai", false, "generate input and assertions using Claude (review before running)")
 
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -267,7 +341,21 @@ func RunInit(args []string) int {
 	}
 
 	nextID := nextEvalID(entries)
-	entry := formatPlaceholderEntry(nextID, substrateID, *pathFlag)
+
+	var entry string
+	if *aiFlag {
+		fmt.Printf("Generating eval fields for %s...\n\n", *pathFlag)
+		model, timeout := loadAIConfig(*configPath)
+		fields, err := generateEvalFields(*pathFlag, model, timeout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: AI generation failed (%v); using placeholder instead.\n\n", err)
+			entry = formatPlaceholderEntry(nextID, substrateID, *pathFlag)
+		} else {
+			entry = formatAIEntry(nextID, substrateID, *pathFlag, fields)
+		}
+	} else {
+		entry = formatPlaceholderEntry(nextID, substrateID, *pathFlag)
+	}
 
 	if *dryRun {
 		fmt.Printf("Would add %s to %s (--dry-run, no changes made).\n", nextID, evalsFile)
