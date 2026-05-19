@@ -79,7 +79,32 @@ concurrency: 4
 
 ### 4. Write your evals
 
-Create `evals.yml`. Each entry pairs a prompt with a task and assertions about what correct output looks like:
+**If your prompts live in files**, scaffold stubs automatically with `scan`:
+
+```bash
+skill-eval scan --dir path/to/your/prompts/
+```
+
+This reads every `.md` file in that directory and appends a placeholder entry to `evals.yml` for each one:
+
+```yaml
+- id: EV-001
+  tests: RU-001
+  prompt_file: path/to/your/prompts/RU-001-params-expect.md
+  # TODO: describe the task the model should perform
+  input: ""
+  assert:
+    # TODO: define assertions for what the output should contain
+    - contains: ""
+```
+
+Fill in `input:` and `assert:` for each entry, then move on to step 5. For a single file, `init` works the same way:
+
+```bash
+skill-eval init --path path/to/your/prompts/RU-001-params-expect.md
+```
+
+**If you prefer to write entries by hand** — or your prompt is short enough to inline — skip the scaffolding and write `evals.yml` directly:
 
 ```yaml
 - id: EV-001
@@ -89,14 +114,6 @@ Create `evals.yml`. Each entry pairs a prompt with a task and assertions about w
   assert:
     - contains: "params.expect"
     - not_contains: "params.permit"
-
-- id: EV-002
-  tests: RU-001
-  prompt_file: substrate/rules/RU-001-params-expect.md
-  input: "Write a Rails controller update action for a Post model with title and body."
-  assert:
-    - contains: "params.expect"
-    - matches: "def (create|update)"
 ```
 
 The key fields:
