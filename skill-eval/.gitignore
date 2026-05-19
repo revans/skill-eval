@@ -1,0 +1,5 @@
+# built binary
+skill-eval
+
+# per-eval run artifacts accumulate quickly; commit summaries instead
+# evals/results/
