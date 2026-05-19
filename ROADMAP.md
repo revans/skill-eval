@@ -4,6 +4,34 @@ Ideas and planned improvements for `skill-eval`. Not a commitment list — an ho
 
 ---
 
+## Prompt stack testing
+
+**What**: Support loading multiple prompt files in a single eval to test how prompts behave when combined. Each prompt individually may be load-bearing, but stacked they can interact in ways that degrade output — increasing hallucinations, amplifying overconfidence, or producing contradictory behavior that neither causes alone.
+
+**Why**: Today every eval tests exactly one prompt fragment in isolation. In production, multiple skills are typically loaded simultaneously. A "be authoritative" skill plus a "always cite specific examples" skill might produce confidently hallucinated citations that neither would produce on its own. This failure mode is invisible to the current tool.
+
+**Shape**:
+
+Add `prompt_files:` as a list field alongside the existing `prompt_file:`:
+
+```yaml
+- id: EV-050
+  tests: RU-001+RU-002
+  prompt_files:
+    - substrate/rules/RU-001-params-expect.md
+    - substrate/rules/RU-002-eager-loading.md
+  input: "Write a Rails controller with associations."
+  assert:
+    - contains: "params.expect"
+    - contains: "includes("
+```
+
+The tool concatenates the prompts in order and treats the result as a single prompt. Existing compare mode and classifications apply unchanged — you discover "this stack is HARMFUL" even when each prompt alone is LOAD-BEARING.
+
+A richer extension: in compare mode, run the stack against each prompt individually and against neither. If the stack produces different behavior from any individual prompt, flag it as an interaction effect. A new classification surfaces naturally: **CONFLICTING** — each prompt passes independently, but the combination changes or degrades output.
+
+---
+
 ## Persistent INSUFFICIENT detection
 
 **What**: When an eval returns `insufficient` across all models in a multi-model targeted run, surface a note pointing toward architectural investigation rather than further prompt refinement.
