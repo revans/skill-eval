@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/revans/skill-eval/pkg/skilleval"
@@ -14,6 +15,125 @@ import (
 // version is set at build time via -ldflags "-X main.version=x.y.z".
 // Falls back to "dev" for local builds.
 var version = "dev"
+
+// --- Terminal / color helpers ---
+
+const (
+	ansiReset  = "\033[0m"
+	ansiRed    = "\033[31m"
+	ansiGreen  = "\033[32m"
+	ansiYellow = "\033[33m"
+)
+
+var (
+	termOnce sync.Once
+	isTTY    bool
+	useColor bool
+)
+
+func checkTerm() {
+	termOnce.Do(func() {
+		fi, err := os.Stdout.Stat()
+		isTTY = err == nil && fi.Mode()&os.ModeCharDevice != 0
+		useColor = isTTY && os.Getenv("NO_COLOR") == ""
+	})
+}
+
+func colorize(s, code string) string {
+	checkTerm()
+	if !useColor {
+		return s
+	}
+	return code + s + ansiReset
+}
+
+// padRight pads s to at least width visible characters.
+// visLen is the visible (non-ANSI) byte length of s.
+func padRight(s string, width, visLen int) string {
+	if pad := width - visLen; pad > 0 {
+		return s + strings.Repeat(" ", pad)
+	}
+	return s
+}
+
+func classificationColor(c skilleval.Classification) string {
+	switch c {
+	case skilleval.LoadBearing:
+		return ansiGreen
+	case skilleval.Harmful:
+		return ansiRed
+	case skilleval.Obsolete, skilleval.Insufficient:
+		return ansiYellow
+	default:
+		return ""
+	}
+}
+
+// --- Spinner ---
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+type spinner struct {
+	mu     sync.Mutex
+	msg    string
+	active bool
+	quit   chan struct{}
+	done   chan struct{}
+}
+
+func newSpinner(msg string) *spinner {
+	return &spinner{
+		msg:    msg,
+		active: true,
+		quit:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+}
+
+func (s *spinner) run() {
+	defer close(s.done)
+	ticker := time.NewTicker(80 * time.Millisecond)
+	defer ticker.Stop()
+	i := 0
+	for {
+		select {
+		case <-s.quit:
+			s.mu.Lock()
+			fmt.Printf("\r\033[K")
+			s.mu.Unlock()
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			if s.active {
+				fmt.Printf("\r%s %s", spinnerFrames[i%len(spinnerFrames)], s.msg)
+			}
+			i++
+			s.mu.Unlock()
+		}
+	}
+}
+
+// pause clears the spinner line. Call resume after printing output.
+func (s *spinner) pause() {
+	s.mu.Lock()
+	s.active = false
+	fmt.Printf("\r\033[K")
+	s.mu.Unlock()
+}
+
+// resume restarts the spinner with a new message.
+func (s *spinner) resume(msg string) {
+	s.mu.Lock()
+	s.msg = msg
+	s.active = true
+	s.mu.Unlock()
+}
+
+// stop shuts down the spinner and waits for it to clear the line.
+func (s *spinner) stop() {
+	close(s.quit)
+	<-s.done
+}
 
 func main() {
 	if len(os.Args) > 1 {
@@ -158,9 +278,21 @@ func runSuiteMode(f cliFlags, cfg skilleval.Config, evals []skilleval.Eval) int 
 
 	printHeader(len(evals), cfg.DefaultModel, concurrency, f.compare)
 
+	checkTerm()
+	total := len(evals)
+
+	var spn *spinner
+	if isTTY {
+		spn = newSpinner(fmt.Sprintf("0/%d complete...", total))
+		go spn.run()
+	}
+
 	wallStart := time.Now()
 
 	workerResults := suite.Run(evals, func(completed, total int, wr skilleval.WorkerResult) {
+		if spn != nil {
+			spn.pause()
+		}
 		if f.compare {
 			printCompareProgress(completed, total, wr, concurrency)
 		} else {
@@ -169,7 +301,14 @@ func runSuiteMode(f cliFlags, cfg skilleval.Config, evals []skilleval.Eval) int 
 		if wr.WriteErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: artifact write failed for %s: %v\n", workerResultID(wr), wr.WriteErr)
 		}
+		if spn != nil && completed < total {
+			spn.resume(fmt.Sprintf("%d/%d complete...", completed, total))
+		}
 	})
+
+	if spn != nil {
+		spn.stop()
+	}
 
 	sort.Slice(workerResults, func(i, j int) bool {
 		return workerResultID(workerResults[i]) < workerResultID(workerResults[j])
@@ -233,13 +372,21 @@ func printSingleProgress(completed, total int, wr skilleval.WorkerResult, concur
 		prefix = fmt.Sprintf("[%d/%d] ", completed, total)
 	}
 
+	// label column is 6 visual chars wide (ERROR=5+1, PASS/FAIL=4+2)
+	const labelW = 6
 	if r.Err != nil {
-		fmt.Printf("%sERROR %-8s  %-8s (%.1fs)\n", prefix, r.EvalID, r.TestsID, durSec)
+		raw := "ERROR"
+		label := padRight(colorize(raw, ansiRed), labelW, len(raw))
+		fmt.Printf("%s%s%-8s  %-8s (%.1fs)\n", prefix, label, r.EvalID, r.TestsID, durSec)
 		fmt.Printf("      error: %v\n", r.Err)
 	} else if r.Passed {
-		fmt.Printf("%sPASS  %-8s  %-8s (%.1fs)\n", prefix, r.EvalID, r.TestsID, durSec)
+		raw := "PASS"
+		label := padRight(colorize(raw, ansiGreen), labelW, len(raw))
+		fmt.Printf("%s%s%-8s  %-8s (%.1fs)\n", prefix, label, r.EvalID, r.TestsID, durSec)
 	} else {
-		fmt.Printf("%sFAIL  %-8s  %-8s (%.1fs)\n", prefix, r.EvalID, r.TestsID, durSec)
+		raw := "FAIL"
+		label := padRight(colorize(raw, ansiRed), labelW, len(raw))
+		fmt.Printf("%s%s%-8s  %-8s (%.1fs)\n", prefix, label, r.EvalID, r.TestsID, durSec)
 		for _, a := range r.Assertions {
 			if !a.Passed {
 				fmt.Printf("      %s %q - failed\n", a.Type, a.Value)
@@ -289,12 +436,17 @@ func printCompareProgress(completed, total int, wr skilleval.WorkerResult, concu
 		prefix = fmt.Sprintf("[%d/%d] ", completed, total)
 	}
 
+	// label column is 14 visual chars wide (longest: LOAD-BEARING=12)
+	const labelW = 14
 	if cr.Err != nil {
-		fmt.Printf("%s%-14s%-8s  %-8s (%.1fs)\n", prefix, "ERROR", cr.EvalID, cr.TestsID, durSec)
+		raw := "ERROR"
+		label := padRight(colorize(raw, ansiRed), labelW, len(raw))
+		fmt.Printf("%s%s%-8s  %-8s (%.1fs)\n", prefix, label, cr.EvalID, cr.TestsID, durSec)
 		fmt.Printf("      error: %v\n", cr.Err)
 	} else {
-		label := classificationLabel(cr.Classification)
-		fmt.Printf("%s%-14s%-8s  %-8s (%.1fs)\n", prefix, label, cr.EvalID, cr.TestsID, durSec)
+		raw := classificationLabel(cr.Classification)
+		label := padRight(colorize(raw, classificationColor(cr.Classification)), labelW, len(raw))
+		fmt.Printf("%s%s%-8s  %-8s (%.1fs)\n", prefix, label, cr.EvalID, cr.TestsID, durSec)
 	}
 }
 
