@@ -59,10 +59,21 @@ The Claude CLI must be on your `$PATH`.
 go install github.com/revans/skill-eval/cmd/skill-eval@latest
 ```
 
+`go install` places the binary in `$GOPATH/bin` — typically `$HOME/go/bin`. Make sure that directory is on your `$PATH`, or the `skill-eval` command won't be found:
+
+```bash
+# Add to ~/.bashrc, ~/.zshrc, or equivalent:
+export PATH="$HOME/go/bin:$PATH"
+
+# Verify:
+skill-eval version
+```
+
 Or build from source:
 
 ```bash
 go build -o skill-eval ./cmd/skill-eval
+./skill-eval version
 ```
 
 ### 3. Create `.skill-eval.yml`
