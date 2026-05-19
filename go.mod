@@ -1,4 +1,4 @@
-module skill-eval
+module github.com/revans/skill-eval
 
 go 1.22
 
