@@ -688,6 +688,80 @@ func TestRunInit_EmptyEvalsFile(t *testing.T) {
 	}
 }
 
+func TestRunInit_CreatesConfigWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".skill-eval.yml")
+	evalsPath := filepath.Join(dir, "evals.yml")
+
+	// Write a config that points to our temp evals path so RunInit writes there.
+	// But first run without a config to confirm it gets created.
+	// We use a real config path in the temp dir that doesn't exist yet.
+	// Since initEvalsFile falls back to "evals.yml" when config is missing,
+	// we create the config first via RunInit, then verify it.
+	code := RunInit([]string{
+		"--config", configPath,
+		"--path", "substrate/rules/RU-001-something.md",
+	})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("expected %s to be created: %v", configPath, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "default_model: claude-sonnet-4-6") {
+		t.Errorf("created config missing default_model: %s", content)
+	}
+	if !strings.Contains(content, "evals_file: evals.yml") {
+		t.Errorf("created config missing evals_file: %s", content)
+	}
+	_ = evalsPath // created as side effect; contents tested in other cases
+}
+
+func TestRunInit_DoesNotOverwriteExistingConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".skill-eval.yml")
+	evalsPath := filepath.Join(dir, "evals.yml")
+
+	customContent := fmt.Sprintf("default_model: custom-model\nevals_file: %s\n", evalsPath)
+	if err := os.WriteFile(configPath, []byte(customContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	RunInit([]string{
+		"--config", configPath,
+		"--path", "substrate/rules/RU-001-something.md",
+	})
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != customContent {
+		t.Errorf("existing config was modified\nwant: %q\ngot:  %q", customContent, string(data))
+	}
+}
+
+func TestRunInit_DryRunDoesNotCreateConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".skill-eval.yml")
+
+	code := RunInit([]string{
+		"--config", configPath,
+		"--path", "substrate/rules/RU-001-something.md",
+		"--dry-run",
+	})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+
+	if _, err := os.Stat(configPath); err == nil {
+		t.Error("dry-run should not create .skill-eval.yml")
+	}
+}
+
 func TestRunInit_DefaultsToEvalsYMLWhenNoConfig(t *testing.T) {
 	// When config is not found, evalsFile defaults to "evals.yml".
 	// We pass a nonexistent config and a valid path — it should succeed

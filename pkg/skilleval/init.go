@@ -14,10 +14,32 @@ import (
 )
 
 var (
-	substrateIDRe   = regexp.MustCompile(`^([A-Z]+-\d+)`)
-	evalIDNumericRe = regexp.MustCompile(`^EV-(\d+)$`)
+	substrateIDRe     = regexp.MustCompile(`^([A-Z]+-\d+)`)
+	evalIDNumericRe   = regexp.MustCompile(`^EV-(\d+)$`)
 	errMalformedEvals = errors.New("malformed evals file")
 )
+
+const defaultConfigContent = `default_model: claude-sonnet-4-6
+evals_file: evals.yml
+results_dir: evals/results
+per_eval_timeout_seconds: 60
+concurrency: 4
+`
+
+// createConfigIfMissing writes defaultConfigContent to path when the file does
+// not already exist. Returns true if the file was created, false if it already
+// existed, and an error on write failure.
+func createConfigIfMissing(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := os.WriteFile(path, []byte(defaultConfigContent), 0644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
 
 // ExtractSubstrateID extracts the prompt ID from a file path.
 // If the basename matches [A-Z]+-\d+, that prefix is returned (e.g. RU-001).
@@ -188,6 +210,17 @@ func RunInit(args []string) int {
 				"Example: skill-eval init --path prompts/RU-001-params-expect.md\n",
 		)
 		return 2
+	}
+
+	if !*dryRun {
+		created, err := createConfigIfMissing(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to create %s: %v\n", *configPath, err)
+			return 2
+		}
+		if created {
+			fmt.Printf("Created %s\n", *configPath)
+		}
 	}
 
 	substrateID := ExtractSubstrateID(*pathFlag)
