@@ -1,24 +1,49 @@
 # skill-eval
 
-A Go CLI for measuring the impact of a prompt fragment on Claude's output.
+A Go CLI that tells you whether your prompts are doing anything — and if so, whether they're helping or hurting.
 
-## What the tool does
+Give it an eval (a prompt, a task, and pass/fail assertions) and it runs the task twice: once with the prompt loaded, once without. Four outcomes: **load-bearing** (prompt helps), **obsolete** (model no longer needs it), **insufficient** (prompt doesn't help), **harmful** (prompt makes things worse).
 
-Given an eval that defines a prompt fragment and an input task, `skill-eval` runs the input with the prompt loaded and checks the model output against assertions. Per-eval results are written to `evals/results/{tests-id}/{eval-id}/`. A summary YAML is automatically written to `evals/summaries/` after every run.
+Run it in CI to catch regressions. Run it in a tight edit-run loop while developing a prompt. Run it quarterly to see which prompts a new model release has made redundant.
 
-With `--compare`, each eval runs twice. The first run sends the prompt + input. The second sends only the input — the model sees the task with no prompt context. The tool classifies the prompt's effect based on which runs passed.
+## Contents
 
-## Prompt vs input distinction
+- [Getting started](#getting-started)
+- [Compare-mode classifications](#compare-mode-classifications)
+- [Summary files](#summary-files)
+  - [compile-summary subcommand](#compile-summary-subcommand)
+- [Targeted mode](#targeted-mode)
+  - [Multi-model matrix output](#multi-model-matrix-output)
+  - [Multi-model artifact layout](#multi-model-artifact-layout)
+  - [Prompt TDD loop](#prompt-tdd-loop)
+  - [Multi-model comparison workflow](#multi-model-comparison-workflow)
+  - [Running suite mode against multiple models](#running-suite-mode-against-multiple-models-shell-loop)
+- [Recipes](#recipes)
+  - [Basic regression check](#basic-regression-check-suite-mode-default-model)
+  - [Quarterly health check](#quarterly-health-check-compare-mode)
+  - [TDD loop while developing a prompt](#tdd-loop-while-developing-a-prompt-targeted-single-model)
+  - [Investigating a prompt across model tiers](#investigating-a-prompt-across-model-tiers-targeted---all-models)
+  - [Pre-deployment validation for a new model release](#pre-deployment-validation-for-a-new-model-release-suite-mode-shell-loop)
+- [Flag reference](#flag-reference)
+  - [Suite mode](#suite-mode-skill-eval-flags)
+  - [Targeted mode](#targeted-mode-skill-eval---prompt-file-path-or-skill-eval---eval-id)
+  - [init subcommand](#init-subcommand-skill-eval-init---path-path---dry-run)
+  - [scan subcommand](#scan-subcommand-skill-eval-scan-flags)
+  - [compile-summary subcommand](#compile-summary-subcommand-skill-eval-compile-summary-flags)
+- [Concurrency considerations](#concurrency-considerations)
+- [Exit codes](#exit-codes)
+- [Assertion types](#assertion-types)
+- [Artifact structure](#artifact-structure)
+- [Eval YAML reference](#eval-yaml-reference)
+- [init subcommand — eval scaffolding](#init-subcommand--eval-scaffolding)
+- [scan subcommand — bulk eval scaffolding](#scan-subcommand--bulk-eval-scaffolding)
 
-- **`prompt`** (or `prompt_file`) — the fragment being tested. Toggled on and off in compare mode.
-- **`input`** — the task the model performs. Constant across all runs.
+## Getting started
 
-Without `--compare`, the runner sends `{prompt}\n\n{input}` to Claude. With `--compare`, it also sends the bare `{input}` as a second, independent invocation.
-
-## Prerequisites
+### 1. Install prerequisites
 
 - **Go 1.22+** — [install](https://go.dev/dl/)
-- **Claude CLI** — `skill-eval` shells out to `claude -p` for every eval. Install it and authenticate before running:
+- **Claude CLI** — `skill-eval` shells out to `claude -p` for every eval. Install and authenticate:
 
 ```bash
 npm install -g @anthropic-ai/claude-code
@@ -26,24 +51,23 @@ claude                      # follow the login prompt to authenticate
 claude -p "hello" --model claude-sonnet-4-6   # verify it works
 ```
 
-The Claude CLI must be on your `$PATH`. The `default_model` in `.skill-eval.yml` must be a model your account can access.
+The Claude CLI must be on your `$PATH`.
 
-## Installation
-
-```bash
-cd skill-eval
-go build -o skill-eval ./cmd/skill-eval
-```
-
-Or install to `$GOPATH/bin`:
+### 2. Install skill-eval
 
 ```bash
 go install github.com/revans/skill-eval/cmd/skill-eval@latest
 ```
 
-## Quick start
+Or build from source:
 
-### `.skill-eval.yml`
+```bash
+go build -o skill-eval ./cmd/skill-eval
+```
+
+### 3. Create `.skill-eval.yml`
+
+Create this config file in your project root:
 
 ```yaml
 default_model: claude-sonnet-4-6
@@ -53,7 +77,9 @@ per_eval_timeout_seconds: 60
 concurrency: 4
 ```
 
-### `evals.yml`
+### 4. Write your evals
+
+Create `evals.yml`. Each entry pairs a prompt with a task and assertions about what correct output looks like:
 
 ```yaml
 - id: EV-001
@@ -73,62 +99,57 @@ concurrency: 4
     - matches: "def (create|update)"
 ```
 
-### Run it
+The key fields:
+
+- **`id`** — unique identifier for this eval (`EV-NNN` by convention)
+- **`tests`** — label for the prompt being tested; used for filtering and artifact paths
+- **`prompt`** — the text being tested; use `prompt_file: path/to/file.md` to load from a file instead
+- **`input`** — the task the model performs; constant across all runs, never toggled off
+- **`assert`** — pass/fail checks on the output; all must pass for the eval to pass
+
+The tool runs the model with `{prompt}\n\n{input}`. In compare mode (`--compare`), it also runs with just `{input}` — no prompt — and classifies the difference.
+
+### 5. Run it
 
 ```bash
-skill-eval --version              # print version and exit
-skill-eval                        # sequential, single-run mode
-skill-eval --concurrency 4        # 4 parallel workers
-skill-eval --compare              # compare mode: two runs per eval, classified
-skill-eval --compare --concurrency 4
-skill-eval --filter RU-001        # filter by tests: field
-skill-eval --filter EV-00         # filter by ID prefix
-
-# Targeted mode — focused compare for a specific prompt file or eval ID
-skill-eval --prompt-file substrate/rules/RU-001-params-expect.md
-skill-eval --eval EV-007
-skill-eval --prompt-file substrate/rules/RU-001-params-expect.md --concurrency 4
-
-# Multi-model targeted mode — compare across models with matrix output
-skill-eval --eval EV-007 --model claude-sonnet-4-6,claude-haiku-4-5
-skill-eval --eval EV-007 --all-models              # uses eval's models: block
-skill-eval --prompt-file substrate/rules/RU-001-params-expect.md --model claude-sonnet-4-6,claude-haiku-4-5
-
-# Scaffold a new eval entry for a prompt file
-skill-eval init --path substrate/rules/RU-001-params-expect.md
-skill-eval init --path substrate/rules/RU-001-params-expect.md --dry-run
-
-# Scan a directory or glob for prompt files and scaffold entries for all of them
-skill-eval scan --dir prompts/
-skill-eval scan --glob "rules/*.md"
-skill-eval scan --dir prompts/ --glob "extra/*.md"
-skill-eval scan --dir prompts/ --dry-run
-
-# Compile a summary from historical per-eval artifacts (e.g. after a crash)
-skill-eval compile-summary --timestamp 2026-05-02-T14-23
-
-# Compile an aggregate summary spanning multiple runs
-skill-eval compile-summary --since 2026-05-01-T00-00 --until 2026-05-02-T23-59
+skill-eval
 ```
 
-Example output (single mode, with concurrency):
+The tool runs every eval in `evals.yml` against the configured model and prints results:
 
 ```
-Running 4 evals against claude-sonnet-4-6 (concurrency: 4)...
+Running 2 evals against claude-sonnet-4-6 (concurrency: 4)...
 
-[1/4] PASS  EV-001    RU-001   (2.3s)
-[2/4] PASS  EV-002    RU-001   (2.1s)
-[3/4] FAIL  EV-003    RU-013   (2.4s)
-      contains "includes(" - failed
-[4/4] PASS  EV-004    RU-002   (1.8s)
+[1/2] PASS  EV-001    RU-001   (2.3s)
+[2/2] PASS  EV-002    RU-001   (2.1s)
 
-Run complete: 3 passed, 1 failed in 2.5s.
-
-Failures:
-  EV-003    RU-013    contains "includes(" - failed
+Run complete: 2 passed, 0 failed in 2.4s.
 ```
 
-Example output (compare mode):
+A summary YAML is written to `evals/summaries/` and per-eval artifacts land in `evals/results/`.
+
+---
+
+The rest of this README covers the different ways to run the tool:
+
+- **[Compare-mode classifications](#compare-mode-classifications)** — run each eval twice to classify whether the prompt is doing work (`--compare`)
+- **[Summary files](#summary-files)** — what gets written after each run and how to use results over time
+- **[Targeted mode](#targeted-mode)** — tight edit-run-classify loop for developing a prompt (`--prompt-file`, `--eval`)
+- **[Recipes](#recipes)** — common workflows: CI regression, quarterly audit, prompt TDD, multi-model validation
+- **[Flag reference](#flag-reference)** — complete flag and subcommand docs
+
+## Compare-mode classifications
+
+Each eval receives one of four classifications based on which runs passed assertions:
+
+| Classification | With prompt | Without prompt | Meaning |
+|---------------|-------------|----------------|---------|
+| `load-bearing` | pass | fail | Prompt is doing real work — model needs it |
+| `obsolete` | pass | pass | Model no longer needs the prompt; consider removing |
+| `insufficient` | fail | fail | Neither run works; investigate the prompt or the eval |
+| `harmful` | fail | pass | Prompt degrades output; investigate immediately |
+
+Example output:
 
 ```
 Running 4 evals against claude-sonnet-4-6 in compare mode (concurrency: 4)...
@@ -153,6 +174,10 @@ Notable findings:
   Harmful (investigate):
     RU-021    EV-019
 ```
+
+Compare mode is a **survey instrument**, not a CI gate. The exit code reflects whether the tool ran successfully (exit 1 = subprocess errors), not the distribution of classifications. Use single mode (`--compare` absent) for CI regression.
+
+Compare mode roughly doubles runtime because each eval makes two `claude -p` subprocess calls. The two calls within an eval are sequential (not parallel) by design. Concurrency across evals still applies.
 
 ## Summary files
 
@@ -229,21 +254,6 @@ skill-eval compile-summary --since 2026-05-01-T00-00 --until 2026-05-02-T23-59
 The `--timestamp` form writes to `evals/summaries/{timestamp}.yml`. The `--since/--until` form writes to `evals/summaries/aggregate-{since}-to-{until}.yml`.
 
 Note: `total_duration_seconds` is 0 in compiled summaries — the original wall-clock time is not recorded in per-eval artifacts.
-
-## Compare-mode classifications
-
-Each eval receives one of four classifications based on which runs passed assertions:
-
-| Classification | With prompt | Without prompt | Meaning |
-|---------------|-------------|----------------|---------|
-| `load-bearing` | pass | fail | Prompt is doing real work — model needs it |
-| `obsolete` | pass | pass | Model no longer needs the prompt; consider removing |
-| `insufficient` | fail | fail | Neither run works; investigate the prompt or the eval |
-| `harmful` | fail | pass | Prompt degrades output; investigate immediately |
-
-Compare mode is a **survey instrument**, not a CI gate. The exit code reflects whether the tool ran successfully (exit 1 = subprocess errors), not the distribution of classifications. Use single mode (`--compare` absent) for CI regression.
-
-Compare mode roughly doubles runtime because each eval makes two `claude -p` subprocess calls. The two calls within an eval are sequential (not parallel) by design. Concurrency across evals still applies.
 
 ## Targeted mode
 
