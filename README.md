@@ -67,7 +67,7 @@ go build -o skill-eval ./cmd/skill-eval
 
 ### 3. Create `.skill-eval.yml`
 
-Create this config file in your project root:
+Running `init` (step 4) creates this file automatically on first use. You can also create it manually if you want to adjust defaults before scaffolding:
 
 ```yaml
 default_model: claude-sonnet-4-6
@@ -77,15 +77,34 @@ per_eval_timeout_seconds: 60
 concurrency: 4
 ```
 
-### 4. Write your evals
+### 4. Scaffold your evals
 
-**If your prompts live in files**, scaffold stubs automatically with `scan`:
+**The fastest path** — point `scan` at your prompt files and let Claude generate input tasks and assertions for each one:
 
 ```bash
-skill-eval scan --dir path/to/your/prompts/
+skill-eval scan --dir path/to/your/prompts/ --ai
 ```
 
-This reads every `.md` file in that directory and appends a placeholder entry to `evals.yml` for each one:
+This reads every `.md` file in that directory, calls Claude once per file to draft a realistic input and assertions, and appends the results to `evals.yml`. If `.skill-eval.yml` doesn't exist yet, it's created with defaults at this step.
+
+```yaml
+- id: EV-001
+  tests: RU-001
+  prompt_file: path/to/your/prompts/RU-001-params-expect.md
+  # AI-generated — review input and assertions before running
+  input: "Write a Rails controller create action for a User model with name and email."
+  assert:
+    - contains: "params.expect"
+    - contains: "def create"
+```
+
+Review each entry before running — the AI draft is a starting point, not a finished test. For a single file, use `init` instead:
+
+```bash
+skill-eval init --path path/to/your/prompts/RU-001-params-expect.md --ai
+```
+
+**Without `--ai`**, both commands produce TODO stubs you fill in by hand:
 
 ```yaml
 - id: EV-001
@@ -98,13 +117,7 @@ This reads every `.md` file in that directory and appends a placeholder entry to
     - contains: ""
 ```
 
-Fill in `input:` and `assert:` for each entry, then move on to step 5. For a single file, `init` works the same way:
-
-```bash
-skill-eval init --path path/to/your/prompts/RU-001-params-expect.md
-```
-
-**If you prefer to write entries by hand** — or your prompt is short enough to inline — skip the scaffolding and write `evals.yml` directly:
+**To write entries by hand** — useful when the prompt is short enough to inline:
 
 ```yaml
 - id: EV-001
